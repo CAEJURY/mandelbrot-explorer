@@ -1,0 +1,549 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<title>Mandelbrot</title>
+<style>
+  :root {
+    --ink: #e7e1d6;
+    --muted: rgba(231, 225, 214, 0.66);
+    --copper: #e3b17a;
+    --glass: rgba(7, 8, 12, 0.78);
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; height: 100%; background: #07080c; color: var(--ink);
+    font-family: ui-sans-serif, system-ui, sans-serif; overflow: hidden;
+    overscroll-behavior: none;
+  }
+  canvas {
+    display: block; width: 100vw; height: 100dvh; touch-action: none; cursor: crosshair;
+    background: #07080c;
+  }
+  canvas.dragging { cursor: grabbing; }
+  header, #hint, #dock, #bar { position: fixed; z-index: 2; }
+  #bar {
+    top: 0; left: 0; height: 2px; width: 100%; background: var(--copper);
+    transform-origin: 0 50%; transform: scaleX(0); opacity: 0; pointer-events: none;
+  }
+  #bar.on { opacity: 0.9; }
+  header {
+    top: 0; left: 0; right: 0; display: flex; justify-content: space-between;
+    gap: 16px; align-items: baseline; padding: 16px 18px 32px; pointer-events: none;
+    background: linear-gradient(to bottom, rgba(7,8,12,0.5), transparent);
+  }
+  .mark {
+    font-family: Palatino, "Iowan Old Style", Georgia, serif;
+    font-variant: small-caps; letter-spacing: 0.22em; font-size: 15px;
+    text-shadow: 0 1px 2px rgba(0,0,0,0.85);
+  }
+  .readout {
+    pointer-events: auto; font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+    font-size: 11px; color: var(--ink); text-shadow: 0 1px 2px rgba(0,0,0,0.9); user-select: text;
+  }
+  #hint {
+    left: 0; right: 0; top: 46%; margin: 0; text-align: center; font-size: 12px;
+    letter-spacing: 0.18em; text-transform: uppercase; text-shadow: 0 1px 2px #000;
+    opacity: 0; transition: opacity 0.8s ease; pointer-events: none;
+  }
+  #hint.show { opacity: 0.78; }
+  #dock {
+    left: 0; right: 0; bottom: 0; display: flex; flex-wrap: wrap; align-items: center;
+    gap: 8px 16px; padding: 12px 14px calc(12px + env(safe-area-inset-bottom));
+    background: var(--glass); border-top: 1px solid rgba(231,225,214,0.12);
+    backdrop-filter: blur(18px) saturate(1.25); -webkit-backdrop-filter: blur(18px) saturate(1.25);
+    transform: translateY(0); transition: transform 0.45s ease;
+  }
+  #dock.hide { transform: translateY(110%); }
+  nav { display: flex; gap: 2px; overflow-x: auto; scrollbar-width: none; }
+  nav::-webkit-scrollbar { display: none; }
+  button, input { font: inherit; color: inherit; }
+  button {
+    background: transparent; border: 0; padding: 7px 8px; letter-spacing: 0.07em;
+    font-size: 12px; text-transform: uppercase; color: var(--muted); cursor: pointer;
+  }
+  button[aria-pressed="true"] { color: var(--copper); box-shadow: inset 0 -1px 0 var(--copper); }
+  button:focus-visible, input:focus-visible { outline: 1px solid var(--copper); outline-offset: 2px; }
+  button.ghost { border: 1px solid rgba(231,225,214,0.22); padding: 6px 12px; }
+  button.ghost[aria-pressed="true"] { box-shadow: none; border-color: rgba(227,177,122,0.7); color: var(--copper); }
+  .iter {
+    display: flex; align-items: center; gap: 10px; margin-left: auto;
+    font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--muted);
+  }
+  .iter input[type="range"] {
+    -webkit-appearance: none; appearance: none; width: min(28vw, 180px); height: 1px;
+    background: rgba(231,225,214,0.38); cursor: pointer;
+  }
+  .iter input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none; width: 11px; height: 11px; border-radius: 50%; background: var(--copper);
+  }
+  .iter output {
+    font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; letter-spacing: 0;
+    color: var(--ink); min-width: 4.5ch; text-align: right; text-transform: none;
+  }
+  @media (max-width: 760px) {
+    .iter { margin-left: 0; width: 100%; }
+    .iter input[type="range"] { flex: 1; width: auto; }
+    header { padding: 12px 12px 24px; }
+    .readout { font-size: 10px; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    #dock, #hint { transition: none; }
+  }
+</style>
+</head>
+<body>
+<canvas id="view" aria-label="Mandelbrot set. Drag to pan. Click to zoom in. Shift-click or right-click to zoom out. Scroll to zoom toward the pointer."></canvas>
+<div id="bar"></div>
+<header>
+  <div class="mark">Mandelbrot</div>
+  <div class="readout" id="readout"></div>
+</header>
+<p id="hint">Drag to pan · click to zoom · scroll to focus</p>
+<footer id="dock">
+  <nav id="presets" aria-label="Locations"></nav>
+  <label class="iter">Iterations
+    <input id="iter" type="range" min="0" max="1000" value="400" aria-label="Maximum iterations">
+    <output id="iterVal">150</output>
+  </label>
+  <button type="button" class="ghost" id="auto" aria-pressed="true">Auto</button>
+  <button type="button" class="ghost" id="reset">Reset</button>
+</footer>
+<script>
+(function () {
+  var ITER_MIN = 50, ITER_MAX = 4000, SPAN_MIN = 1e-13, SPAN_MAX = 6;
+  var PRESETS = [
+    { id: "overview", name: "Overview", cx: -0.5, cy: 0, span: 2.5 },
+    { id: "seahorse", name: "Seahorse", cx: -0.7453, cy: 0.1127, span: 0.022 },
+    { id: "elephant", name: "Elephant", cx: 0.301, cy: 0.018, span: 0.055 },
+    { id: "spiral", name: "Triple spiral", cx: -0.088, cy: 0.654, span: 0.032 },
+    { id: "mini", name: "Minibrot", cx: -1.7685, cy: 0.0005, span: 0.014 }
+  ];
+  var PAL_N = 1024;
+  var PAL_R = new Uint8ClampedArray(PAL_N);
+  var PAL_G = new Uint8ClampedArray(PAL_N);
+  var PAL_B = new Uint8ClampedArray(PAL_N);
+  var STOPS = [
+    [0.00, 12, 16, 32],
+    [0.16, 26, 38, 74],
+    [0.34, 116, 48, 74],
+    [0.50, 196, 92, 48],
+    [0.66, 236, 176, 92],
+    [0.80, 242, 228, 204],
+    [0.90, 142, 198, 192],
+    [1.00, 12, 16, 32]
+  ];
+  function sampleStop(t) {
+    var i = 0;
+    while (i < STOPS.length - 2 && STOPS[i + 1][0] < t) i++;
+    var a = STOPS[i], b = STOPS[i + 1];
+    var f = (t - a[0]) / (b[0] - a[0]);
+    var u = f * f * (3 - 2 * f);
+    return [a[1] + (b[1] - a[1]) * u, a[2] + (b[2] - a[2]) * u, a[3] + (b[3] - a[3]) * u];
+  }
+  for (var pi = 0; pi < PAL_N; pi++) {
+    var rgb = sampleStop(pi / PAL_N);
+    PAL_R[pi] = rgb[0]; PAL_G[pi] = rgb[1]; PAL_B[pi] = rgb[2];
+  }
+
+  var view = document.getElementById("view");
+  var vctx = view.getContext("2d", { alpha: false });
+  var back = document.createElement("canvas");
+  var bctx = back.getContext("2d", { alpha: false });
+  var readout = document.getElementById("readout");
+  var hint = document.getElementById("hint");
+  var dock = document.getElementById("dock");
+  var bar = document.getElementById("bar");
+  var iterInput = document.getElementById("iter");
+  var iterVal = document.getElementById("iterVal");
+  var autoBtn = document.getElementById("auto");
+  var presetNav = document.getElementById("presets");
+  var presetButtons = {};
+
+  var state = {
+    cx: -0.5, cy: 0, span: 2.5, maxIter: 160,
+    autoIter: true, preset: "overview"
+  };
+  var silencing = false;
+  var token = 0;
+  var painting = false;
+  var queued = null;
+  var finalTimer = 0;
+  var anim = null;
+  var reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  var coarse = window.matchMedia("(pointer: coarse)").matches;
+
+  function clamp(v, a, b) { return v < a ? a : v > b ? b : v; }
+  function autoIterations(span) {
+    var zoom = 2.5 / span;
+    var n = 140 + 70 * Math.log2(Math.max(zoom, 1));
+    return Math.round(clamp(n, 140, ITER_MAX));
+  }
+  function iterToSlider(iter) {
+    var t = (Math.log(iter) - Math.log(ITER_MIN)) / (Math.log(ITER_MAX) - Math.log(ITER_MIN));
+    return Math.round(clamp(t, 0, 1) * 1000);
+  }
+  function sliderToIter(v) {
+    var t = v / 1000;
+    return Math.round(Math.exp(Math.log(ITER_MIN) + t * (Math.log(ITER_MAX) - Math.log(ITER_MIN))));
+  }
+  function setIter(n, fromSlider) {
+    state.maxIter = n;
+    iterVal.textContent = String(n);
+    if (!fromSlider) {
+      silencing = true;
+      iterInput.value = String(iterToSlider(n));
+      silencing = false;
+    }
+  }
+  function fmtNum(n) {
+    var a = Math.abs(n);
+    if (n !== 0 && (a < 1e-4 || a >= 1e4)) return n.toExponential(3);
+    return n.toFixed(6);
+  }
+  function fmtZoom(span) {
+    var z = 2.5 / span;
+    if (z < 10) return z.toFixed(2) + "\u00d7";
+    if (z < 100) return z.toFixed(1) + "\u00d7";
+    if (z < 1e6) return Math.round(z).toLocaleString() + "\u00d7";
+    return z.toExponential(2) + "\u00d7";
+  }
+  function updateReadout() {
+    var sign = state.cy < 0 ? " \u2212 " : " + ";
+    var note = state.span < 5e-13 ? "  \u00b7 precision limit" : "";
+    readout.textContent = fmtNum(state.cx) + sign + fmtNum(Math.abs(state.cy)) + "i   " + fmtZoom(state.span) + note;
+  }
+  function refreshPreset() {
+    Object.keys(presetButtons).forEach(function (id) {
+      presetButtons[id].setAttribute("aria-pressed", id === state.preset ? "true" : "false");
+    });
+  }
+  function resizeView() {
+    var r = view.getBoundingClientRect();
+    var dpr = Math.min(window.devicePixelRatio || 1, 1.75);
+    var w = Math.max(2, Math.round(r.width * dpr));
+    var h = Math.max(2, Math.round(r.height * dpr));
+    if (view.width !== w || view.height !== h) {
+      view.width = w; view.height = h;
+      vctx.fillStyle = "#07080c";
+      vctx.fillRect(0, 0, w, h);
+    }
+  }
+  function mandelbrot(cr, ci, maxIter) {
+    var y2 = ci * ci;
+    var xq = cr - 0.25;
+    var q = xq * xq + y2;
+    if (q * (q + xq) <= 0.25 * y2) return -1;
+    var xb = cr + 1;
+    if (xb * xb + y2 <= 0.0625) return -1;
+    var zr = 0, zi = 0, zr2 = 0, zi2 = 0, n = 0;
+    while (n < maxIter && zr2 + zi2 <= 65536) {
+      zi = 2 * zr * zi + ci;
+      zr = zr2 - zi2 + cr;
+      zr2 = zr * zr;
+      zi2 = zi * zi;
+      n++;
+    }
+    if (n >= maxIter) return -1;
+    var log2z = Math.log(zr2 + zi2) * 0.5 / Math.LN2;
+    return n + 1 - Math.log(log2z) / Math.LN2;
+  }
+  function renderRows(img, y0, y1, w, h, cx, cy, span, maxIter) {
+    var aspect = w / h;
+    var data = img.data;
+    var band = PAL_N / 92;
+    for (var y = y0; y < y1; y++) {
+      var im = cy - ((y + 0.5) / h - 0.5) * span;
+      var o = y * w * 4;
+      for (var x = 0; x < w; x++) {
+        var re = cx + ((x + 0.5) / w - 0.5) * span * aspect;
+        var mu = mandelbrot(re, im, maxIter);
+        if (mu < 0) {
+          data[o] = 8; data[o + 1] = 9; data[o + 2] = 14; data[o + 3] = 255;
+        } else {
+          var u = mu * band;
+          var i0 = Math.floor(u) % PAL_N;
+          if (i0 < 0) i0 += PAL_N;
+          var f = u - Math.floor(u);
+          var i1 = (i0 + 1) % PAL_N;
+          data[o] = PAL_R[i0] + (PAL_R[i1] - PAL_R[i0]) * f;
+          data[o + 1] = PAL_G[i0] + (PAL_G[i1] - PAL_G[i0]) * f;
+          data[o + 2] = PAL_B[i0] + (PAL_B[i1] - PAL_B[i0]) * f;
+          data[o + 3] = 255;
+        }
+        o += 4;
+      }
+    }
+  }
+
+  function previewSize() {
+    var long = Math.max(view.width, view.height);
+    var s = Math.max(long / 420, 1);
+    return { w: Math.max(2, Math.round(view.width / s)), h: Math.max(2, Math.round(view.height / s)) };
+  }
+  function schedule(mode) {
+    queued = mode;
+    clearTimeout(finalTimer);
+    if (mode === "preview") {
+      finalTimer = setTimeout(function () { schedule("final"); }, 150);
+    }
+    if (!painting) pump();
+  }
+  function pump() {
+    if (!queued || painting) return;
+    var mode = queued;
+    queued = null;
+    painting = true;
+    var my = ++token;
+    if (state.autoIter) setIter(autoIterations(state.span), false);
+    updateReadout();
+    resizeView();
+    var size = mode === "preview" ? previewSize() : { w: view.width, h: view.height };
+    back.width = size.w;
+    back.height = size.h;
+    var img = bctx.createImageData(size.w, size.h);
+    var snap = { cx: state.cx, cy: state.cy, span: state.span, maxIter: state.maxIter };
+    var y = 0;
+    var rowsPer = mode === "preview" ? 28 : 10;
+    if (mode !== "final") bar.classList.remove("on");
+    function slice() {
+      if (my !== token) { painting = false; bar.classList.remove("on"); pump(); return; }
+      var t0 = performance.now();
+      var budget = mode === "preview" ? 14 : 10;
+      var y0 = y;
+      while (y < size.h && performance.now() - t0 < budget) {
+        var y1 = Math.min(size.h, y + rowsPer);
+        renderRows(img, y, y1, size.w, size.h, snap.cx, snap.cy, snap.span, snap.maxIter);
+        y = y1;
+      }
+      if (mode === "final" && y > y0) {
+        bctx.putImageData(img, 0, 0, 0, y0, size.w, y - y0);
+        var scaleY = view.height / size.h;
+        vctx.imageSmoothingEnabled = false;
+        vctx.drawImage(back, 0, y0, size.w, y - y0, 0, y0 * scaleY, view.width, (y - y0) * scaleY);
+        bar.classList.add("on");
+        bar.style.transform = "scaleX(" + (y / size.h) + ")";
+      }
+      if (y < size.h) { requestAnimationFrame(slice); return; }
+      bctx.putImageData(img, 0, 0);
+      vctx.imageSmoothingEnabled = mode === "preview";
+      vctx.drawImage(back, 0, 0, view.width, view.height);
+      painting = false;
+      if (mode === "final") {
+        bar.style.transform = "scaleX(1)";
+        setTimeout(function () { if (token === my) bar.classList.remove("on"); }, 240);
+      }
+      if (queued) pump();
+    }
+    requestAnimationFrame(slice);
+  }
+
+  function ease(t) { return 1 - Math.pow(1 - t, 3); }
+  function flyTo(target, presetId) {
+    state.preset = presetId || null;
+    refreshPreset();
+    if (reduceMotion) {
+      state.cx = target.cx; state.cy = target.cy; state.span = target.span;
+      anim = null; schedule("final"); return;
+    }
+    anim = {
+      from: { cx: state.cx, cy: state.cy, log: Math.log(state.span) },
+      to: { cx: target.cx, cy: target.cy, log: Math.log(target.span) },
+      t0: performance.now(), dur: 460
+    };
+    requestAnimationFrame(tickAnim);
+  }
+  function tickAnim() {
+    if (!anim) return;
+    var t = clamp((performance.now() - anim.t0) / anim.dur, 0, 1);
+    var e = ease(t);
+    state.cx = anim.from.cx + (anim.to.cx - anim.from.cx) * e;
+    state.cy = anim.from.cy + (anim.to.cy - anim.from.cy) * e;
+    state.span = Math.exp(anim.from.log + (anim.to.log - anim.from.log) * e);
+    if (t >= 1) { anim = null; schedule("final"); }
+    else { schedule("preview"); requestAnimationFrame(tickAnim); }
+  }
+  function zoomAt(clientX, clientY, factor, animate) {
+    var rect = view.getBoundingClientRect();
+    var nx = (clientX - rect.left) / rect.width - 0.5;
+    var ny = (clientY - rect.top) / rect.height - 0.5;
+    var aspect = rect.width / rect.height;
+    var re = state.cx + nx * state.span * aspect;
+    var im = state.cy - ny * state.span;
+    var span = clamp(state.span * factor, SPAN_MIN, SPAN_MAX);
+    var next = { cx: re - nx * span * aspect, cy: im + ny * span, span: span };
+    state.preset = null;
+    refreshPreset();
+    hideHint();
+    if (animate && !reduceMotion && (factor < 0.8 || factor > 1.25)) flyTo(next, null);
+    else {
+      anim = null;
+      state.cx = next.cx; state.cy = next.cy; state.span = next.span;
+      schedule("preview");
+    }
+  }
+  function hideHint() { hint.classList.remove("show"); }
+
+  var drag = null;
+  var pointers = new Map();
+  var pinch = null;
+  view.addEventListener("pointerdown", function (e) {
+    view.setPointerCapture(e.pointerId);
+    pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pointers.size === 2) { pinch = pinchInfo(); drag = null; return; }
+    drag = { x: e.clientX, y: e.clientY, cx: state.cx, cy: state.cy, span: state.span, moved: false };
+  });
+  function pinchInfo() {
+    var pts = Array.from(pointers.values());
+    return {
+      d: Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y),
+      x: (pts[0].x + pts[1].x) / 2,
+      y: (pts[0].y + pts[1].y) / 2,
+      span: state.span, cx: state.cx, cy: state.cy
+    };
+  }
+  view.addEventListener("pointermove", function (e) {
+    if (!pointers.has(e.pointerId)) return;
+    pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pointers.size >= 2 && pinch) {
+      var now = pinchInfo();
+      var rect = view.getBoundingClientRect();
+      var factor = pinch.d / Math.max(8, now.d);
+      var nx = (now.x - rect.left) / rect.width - 0.5;
+      var ny = (now.y - rect.top) / rect.height - 0.5;
+      var aspect = rect.width / rect.height;
+      var re = pinch.cx + ((pinch.x - rect.left) / rect.width - 0.5) * pinch.span * aspect;
+      var im = pinch.cy - ((pinch.y - rect.top) / rect.height - 0.5) * pinch.span;
+      var span = clamp(pinch.span * factor, SPAN_MIN, SPAN_MAX);
+      state.cx = re - nx * span * aspect;
+      state.cy = im + ny * span;
+      state.span = span;
+      state.preset = null;
+      refreshPreset();
+      anim = null;
+      hideHint();
+      schedule("preview");
+      return;
+    }
+    if (!drag) return;
+    var dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+    if (!drag.moved && Math.hypot(dx, dy) < 4) return;
+    drag.moved = true;
+    view.classList.add("dragging");
+    var rect2 = view.getBoundingClientRect();
+    var aspect2 = rect2.width / rect2.height;
+    state.cx = drag.cx - (dx / rect2.width) * drag.span * aspect2;
+    state.cy = drag.cy + (dy / rect2.height) * drag.span;
+    state.preset = null;
+    refreshPreset();
+    anim = null;
+    hideHint();
+    schedule("preview");
+  });
+  function endPointer(e) {
+    pointers.delete(e.pointerId);
+    if (pointers.size < 2) pinch = null;
+    view.classList.remove("dragging");
+    if (drag && !drag.moved && pointers.size === 0) {
+      zoomAt(e.clientX, e.clientY, (e.shiftKey || e.button === 2) ? 2 : 0.5, true);
+    } else if (drag && drag.moved) schedule("final");
+    drag = null;
+  }
+  view.addEventListener("pointerup", endPointer);
+  view.addEventListener("pointercancel", endPointer);
+  view.addEventListener("contextmenu", function (e) { e.preventDefault(); });
+  view.addEventListener("wheel", function (e) {
+    e.preventDefault();
+    var k = e.ctrlKey ? 0.01 : 0.00115;
+    zoomAt(e.clientX, e.clientY, Math.exp(e.deltaY * k), false);
+  }, { passive: false });
+  view.addEventListener("dblclick", function (e) { e.preventDefault(); });
+
+  PRESETS.forEach(function (p) {
+    var b = document.createElement("button");
+    b.type = "button";
+    b.textContent = p.name;
+    b.setAttribute("aria-pressed", p.id === state.preset ? "true" : "false");
+    b.addEventListener("click", function () { hideHint(); flyTo(p, p.id); });
+    presetNav.appendChild(b);
+    presetButtons[p.id] = b;
+  });
+  document.getElementById("reset").addEventListener("click", function () {
+    state.autoIter = true;
+    autoBtn.setAttribute("aria-pressed", "true");
+    hideHint();
+    flyTo(PRESETS[0], "overview");
+  });
+  autoBtn.addEventListener("click", function () {
+    state.autoIter = !state.autoIter;
+    autoBtn.setAttribute("aria-pressed", state.autoIter ? "true" : "false");
+    schedule("final");
+  });
+  iterInput.addEventListener("input", function () {
+    if (silencing) return;
+    state.autoIter = false;
+    autoBtn.setAttribute("aria-pressed", "false");
+    setIter(sliderToIter(+iterInput.value), true);
+    schedule("preview");
+  });
+
+  window.addEventListener("keydown", function (e) {
+    if (e.target && e.target.id === "iter") return;
+    var rect = view.getBoundingClientRect();
+    var aspect = rect.width / rect.height;
+    if (e.key === "ArrowLeft") { state.cx -= state.span * aspect * 0.08; state.preset = null; }
+    else if (e.key === "ArrowRight") { state.cx += state.span * aspect * 0.08; state.preset = null; }
+    else if (e.key === "ArrowUp") { state.cy += state.span * 0.08; state.preset = null; }
+    else if (e.key === "ArrowDown") { state.cy -= state.span * 0.08; state.preset = null; }
+    else if (e.key === "+" || e.key === "=") { zoomAt(rect.left + rect.width / 2, rect.top + rect.height / 2, 0.62, true); return; }
+    else if (e.key === "-" || e.key === "_") { zoomAt(rect.left + rect.width / 2, rect.top + rect.height / 2, 1.6, true); return; }
+    else if (e.key === "[" || e.key === "]") {
+      state.autoIter = false;
+      autoBtn.setAttribute("aria-pressed", "false");
+      setIter(clamp(Math.round(state.maxIter * (e.key === "]" ? 1.25 : 0.8)), ITER_MIN, ITER_MAX), false);
+    } else if (e.key === "r" || e.key === "R" || e.key === "0") {
+      state.autoIter = true; autoBtn.setAttribute("aria-pressed", "true");
+      flyTo(PRESETS[0], "overview"); return;
+    } else if (e.key >= "1" && e.key <= "5") {
+      flyTo(PRESETS[+e.key - 1], PRESETS[+e.key - 1].id); return;
+    } else return;
+    refreshPreset();
+    hideHint();
+    anim = null;
+    schedule("preview");
+    e.preventDefault();
+  });
+
+  var dockTimer = 0;
+  function pokeDock() {
+    if (coarse) return;
+    dock.classList.remove("hide");
+    clearTimeout(dockTimer);
+    dockTimer = setTimeout(function () {
+      if (dock.matches(":hover") || dock.contains(document.activeElement)) return;
+      dock.classList.add("hide");
+    }, 2400);
+  }
+  document.addEventListener("pointermove", function (e) {
+    if (e.clientY > window.innerHeight - 150) pokeDock();
+  });
+  dock.addEventListener("pointerenter", function () { clearTimeout(dockTimer); dock.classList.remove("hide"); });
+  dock.addEventListener("pointerleave", pokeDock);
+  window.addEventListener("resize", function () { resizeView(); schedule("preview"); });
+
+  setIter(autoIterations(state.span), false);
+  refreshPreset();
+  updateReadout();
+  resizeView();
+  requestAnimationFrame(function () {
+    hint.classList.add("show");
+    schedule("preview");
+    setTimeout(hideHint, 3200);
+    if (!coarse) setTimeout(function () { dock.classList.add("hide"); }, 3400);
+  });
+})();
+</script>
+</body>
+</html>
